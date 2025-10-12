@@ -198,31 +198,36 @@ The input parquet file should contain the following columns:
 ## Output Format
 
 ### File Structure
-Validated data is saved as CSV files organized by station and date:
+Validated data is saved as CSV files organized by station and month:
 
 ```
 output/
 ├── SBR/
-│   ├── solar_validated_SBR_2024-01-01.csv
-│   ├── solar_validated_SBR_2024-01-02.csv
+│   ├── solar_validated_SBR_2024-01.csv
+│   ├── solar_validated_SBR_2024-02.csv
 │   └── ...
 ├── NAT/
-│   ├── solar_validated_NAT_2024-01-01.csv
+│   ├── solar_validated_NAT_2024-01.csv
 │   └── ...
 └── ...
 ```
 
 ### Output File Format
-Each output CSV file contains:
+Each output CSV file contains all data for a specific station and month:
 - Original measurement values
 - Corresponding DQC flags for each variable
 - Station metadata (latitude, longitude)
 - Temporal information (year, day, minute)
 
+**Note**: Files are organized by month (YYYY-MM format) rather than daily files to reduce the number of output files and improve data management.
+
 **Example output columns:**
 ```
 acronym,timestamp,year,day,min,glo_avg,glo_avg_dqc,dir_avg,dir_avg_dqc,temp_avg,temp_avg_dqc,...
 SBR,2024-01-01 00:00:00,2024,1,0,0.0,555,0.0,555,25.3,999,...
+SBR,2024-01-01 00:10:00,2024,1,10,150.2,999,120.5,999,25.1,999,...
+SBR,2024-01-01 00:20:00,2024,1,20,280.7,999,200.3,999,24.8,999,...
+...
 ```
 
 ## Validation Algorithms
