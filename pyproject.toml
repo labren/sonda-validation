@@ -13,6 +13,9 @@ dependencies = [
     "pyarrow>=12.0.0"
 ]
 
+[project.scripts]
+sonda-validation = "main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
@@ -23,3 +26,6 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core"]
