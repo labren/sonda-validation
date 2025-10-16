@@ -58,9 +58,17 @@ class auxFunctions:
     @staticmethod
     def load_station_metadata():
         """Carrega metadados (station, lat, lon) do CSV"""
-        location_csv = os.path.expanduser("INPESONDA_stations.csv")
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(script_dir)
+        location_csv = os.path.join(project_root, "data", "metadata", "INPESONDA_stations.csv")
+        
+        # Fallback to current directory if not found in data/metadata
         if not os.path.exists(location_csv):
-            raise FileNotFoundError("Arquivo 'INPESONDA_stations.csv' não encontrado.")
+            location_csv = os.path.join(project_root, "INPESONDA_stations.csv")
+        
+        if not os.path.exists(location_csv):
+            raise FileNotFoundError(f"Arquivo 'INPESONDA_stations.csv' não encontrado. Procurou em: {location_csv}")
 
         df_locations = pd.read_csv(location_csv)
         df_locations['station_normalized'] = df_locations['station'].astype(str).str.strip().str.upper()        
@@ -70,9 +78,17 @@ class auxFunctions:
     @staticmethod
     def load_normais_climaticas():
         """Carrega as normais climáticas a partir de um CSV"""
-        normais_csv = os.path.expanduser("INPESONDA_normais.csv")
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(script_dir)
+        normais_csv = os.path.join(project_root, "data", "metadata", "INPESONDA_normais.csv")
+        
+        # Fallback to current directory if not found in data/metadata
         if not os.path.exists(normais_csv):
-            raise FileNotFoundError(f"Arquivo 'INPESONDA_normais.csv' não encontrado.")
+            normais_csv = os.path.join(project_root, "INPESONDA_normais.csv")
+        
+        if not os.path.exists(normais_csv):
+            raise FileNotFoundError(f"Arquivo 'INPESONDA_normais.csv' não encontrado. Procurou em: {normais_csv}")
 
         df_normais = pd.read_csv(normais_csv, sep=';')
 
@@ -142,7 +158,10 @@ class auxFunctions:
             con.execute("SET enable_progress_bar=false")  # Disable progress bar for cleaner output
             con.execute("SET enable_object_cache=true")  # Enable object caching
             con.execute("SET enable_http_metadata_cache=true")  # Enable metadata caching
-            con.execute("SET temp_directory='/tmp'")  # Use temp directory for large operations
+            # Use system temp directory for large operations
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            con.execute(f"SET temp_directory='{temp_dir}'")
 
             # Carregar dados com otimizações
             step_start = time.time()

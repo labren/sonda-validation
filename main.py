@@ -86,10 +86,12 @@ from core.sondaUtils import auxFunctions
 
 ###############################
 # Caminho do arquivo parquet com todas as estações
-PARQUET_FILE = "data/raw/Solarimetrica-001.parquet"
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARQUET_FILE = os.path.join(SCRIPT_DIR, "data", "raw", "Solarimetrica-001.parquet")
 
 # Pasta de saída
-OUTPUT_DIR = "data/output"
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "data", "output")
 
 # Linhas do 
 N_ROWS = None
