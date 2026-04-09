@@ -439,190 +439,200 @@ class SolarimetricValidator:
     # Execução das validações solarimétricas
     # -------------------------
     def run_solar_validation(self):
-        """Optimized solar validation that processes all variables in a single query"""
+        """Solar validation with reversed DQC order, cascade, and '0' placeholder.
+
+        DQC digit layout (per variable):
+          3-alg (glo, dir, dif): pos1=Alg3 | pos2=Alg2 | pos3=Alg1 | pos4='0'
+          2-alg (lw, par, lux):  pos1=Alg2 | pos2=Alg1 | pos3='0'
+
+        Cascade: flag=2 at position N forces position N+1 to 2.
+                 flag=5 does NOT cascade.
+        """
         print("=== INICIANDO VALIDAÇÕES SOLARES OTIMIZADAS ===")
-        
-        # Check which columns exist
-        colunas_existentes = self.con.execute(f"PRAGMA table_info('{self.tabela_origem}')").fetch_df()['name'].tolist()
-        
-        # Build dynamic validation query for all solar variables at once
-        validation_columns = []
-        
-        # Global radiation validation
+
+        colunas_existentes = self.con.execute(
+            f"PRAGMA table_info('{self.tabela_origem}')"
+        ).fetch_df()['name'].tolist()
+
+        cte_cols = []   # raw algorithm columns computed inside the CTE
+        sel_cols = []   # final DQC columns with cascade in the outer SELECT
+
         if "glo_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 glo_avg,
-                CAST(
-                    CASE
-                        WHEN glo_avg IS NULL OR glo_std IS NULL THEN 5
-                        WHEN glo_std = 0 THEN 2
-                        WHEN glo_avg < -4 OR glo_avg > (Sa * 1.5 * POWER(mu0, 1.2) + 100) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN glo_avg IS NULL THEN 5
-                        WHEN glo_avg < -2 OR glo_avg > (Sa * 1.2 * POWER(mu0, 1.2) + 50) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN glo_avg IS NULL THEN 5
-                        WHEN Sum IS NULL OR Sum <= 50 THEN 5
-                        WHEN azs < 75 AND ABS(glo_avg / Sum - 1) > 0.10 THEN 2
-                        WHEN azs >= 75 AND azs < 93 AND ABS(glo_avg / Sum - 1) > 0.15 THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) AS glo_avg_dqc
+                CASE WHEN glo_avg IS NULL OR glo_std IS NULL THEN 5
+                     WHEN glo_std = 0 THEN 2
+                     WHEN glo_avg < -4 OR glo_avg > (Sa * 1.5 * POWER(mu0, 1.2) + 100) THEN 2
+                     ELSE 9 END AS glo_r1,
+                CASE WHEN glo_avg IS NULL THEN 5
+                     WHEN glo_avg < -2 OR glo_avg > (Sa * 1.2 * POWER(mu0, 1.2) + 50) THEN 2
+                     ELSE 9 END AS glo_r2,
+                CASE WHEN glo_avg IS NULL THEN 5
+                     WHEN Sum IS NULL OR Sum <= 50 THEN 5
+                     WHEN azs < 75 AND ABS(glo_avg / Sum - 1) > 0.10 THEN 2
+                     WHEN azs >= 75 AND azs < 93 AND ABS(glo_avg / Sum - 1) > 0.15 THEN 2
+                     ELSE 9 END AS glo_r3
             """)
-        
-        # Direct radiation validation
+            sel_cols.append("""
+                glo_avg,
+                CAST(glo_r3 AS VARCHAR) ||
+                CAST(CASE WHEN glo_r3 = 2 THEN 2 ELSE glo_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN glo_r3 = 2 OR glo_r2 = 2 THEN 2 ELSE glo_r1 END AS VARCHAR) AS glo_avg_dqc
+            """)
+
         if "dir_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 dir_avg,
-                CAST(
-                    CASE
-                        WHEN dir_avg IS NULL OR dir_std IS NULL THEN 5
-                        WHEN dir_std = 0 THEN 2
-                        WHEN dir_avg < -4 OR dir_avg > Sa THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN dir_avg IS NULL THEN 5
-                        WHEN dir_avg < -2 OR dir_avg > (Sa * 0.95 * POWER(mu0, 0.2) + 10) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN dir_avg IS NULL THEN 5
-                        WHEN (dir_avg * mu0 - 50) > (glo_avg - dir_avg)
-                          OR (glo_avg - dir_avg) > (dir_avg * mu0 + 50)
-                        THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) AS dir_avg_dqc
+                CASE WHEN dir_avg IS NULL OR dir_std IS NULL THEN 5
+                     WHEN dir_std = 0 THEN 2
+                     WHEN dir_avg < -4 OR dir_avg > Sa THEN 2
+                     ELSE 9 END AS dir_r1,
+                CASE WHEN dir_avg IS NULL THEN 5
+                     WHEN dir_avg < -2 OR dir_avg > (Sa * 0.95 * POWER(mu0, 0.2) + 10) THEN 2
+                     ELSE 9 END AS dir_r2,
+                CASE WHEN dir_avg IS NULL THEN 5
+                     WHEN dir_avg <= 0 THEN 9
+                     WHEN (dir_avg * mu0 - 50) > (glo_avg - dir_avg)
+                       OR (glo_avg - dir_avg) > (dir_avg * mu0 + 50)
+                     THEN 2
+                     ELSE 9 END AS dir_r3
             """)
-        
-        # Diffuse radiation validation
+            sel_cols.append("""
+                dir_avg,
+                CAST(dir_r3 AS VARCHAR) ||
+                CAST(CASE WHEN dir_r3 = 2 THEN 2 ELSE dir_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN dir_r3 = 2 OR dir_r2 = 2 THEN 2 ELSE dir_r1 END AS VARCHAR) AS dir_avg_dqc
+            """)
+
         if "dif_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 dif_avg,
-                CAST(
-                    CASE
-                        WHEN dif_avg IS NULL OR dif_std IS NULL THEN 5 
-                        WHEN dif_std = 0 THEN 2
-                        WHEN dif_avg < -4 OR dif_avg > (Sa * 0.95 * POWER(mu0, 1.2) + 50) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN dif_avg IS NULL THEN 5
-                        WHEN dif_avg < -2 OR dif_avg > (Sa * 0.75 * POWER(mu0, 1.2) + 30) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN dif_avg IS NULL THEN 5
-                        WHEN glo_avg IS NULL OR glo_avg <= 50 THEN 5
-                        WHEN azs < 75 AND dif_avg / glo_avg > 1.05 THEN 2
-                        WHEN azs >= 75 AND azs < 93 AND dif_avg / glo_avg > 1.10 THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) AS dif_avg_dqc
+                CASE WHEN dif_avg IS NULL OR dif_std IS NULL THEN 5
+                     WHEN dif_std = 0 THEN 2
+                     WHEN dif_avg < -4 OR dif_avg > (Sa * 0.95 * POWER(mu0, 1.2) + 50) THEN 2
+                     ELSE 9 END AS dif_r1,
+                CASE WHEN dif_avg IS NULL THEN 5
+                     WHEN dif_avg < -2 OR dif_avg > (Sa * 0.75 * POWER(mu0, 1.2) + 30) THEN 2
+                     ELSE 9 END AS dif_r2,
+                CASE WHEN dif_avg IS NULL THEN 5
+                     WHEN glo_avg IS NULL OR glo_avg <= 50 THEN 5
+                     WHEN azs < 75 AND dif_avg / glo_avg > 1.05 THEN 2
+                     WHEN azs >= 75 AND azs < 93 AND dif_avg / glo_avg > 1.10 THEN 2
+                     ELSE 9 END AS dif_r3
             """)
-        
-        # Longwave radiation validation
+            sel_cols.append("""
+                dif_avg,
+                CAST(dif_r3 AS VARCHAR) ||
+                CAST(CASE WHEN dif_r3 = 2 THEN 2 ELSE dif_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN dif_r3 = 2 OR dif_r2 = 2 THEN 2 ELSE dif_r1 END AS VARCHAR) AS dif_avg_dqc
+            """)
+
         if "lw_avg" in colunas_existentes:
-            validation_columns.append("""
+            if "tp_sfc" in colunas_existentes:
+                # Raw temp flags — used by lw Alg3 (Stefan-Boltzmann consistency)
+                cte_cols.append("""
+                    CASE WHEN tp_sfc IS NULL THEN 5
+                         WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2
+                         ELSE 9 END AS tp_r1_lw,
+                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                         WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
+                         ELSE 9 END AS tp_r2_lw,
+                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                         WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                         ELSE 9 END AS tp_r3_lw
+                """)
+            cte_cols.append("""
                 lw_avg,
-                CAST(
-                    CASE
-                        WHEN lw_avg IS NULL OR lw_std IS NULL THEN 5
-                        WHEN lw_std = 0 THEN 2
-                        WHEN lw_avg < 40 OR lw_avg > 700 THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN lw_avg IS NULL THEN 5
-                        WHEN lw_avg < 60 OR lw_avg > 500 THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) AS lw_avg_dqc
+                CASE WHEN lw_avg IS NULL OR lw_std IS NULL THEN 5
+                     WHEN lw_std = 0 THEN 2
+                     WHEN lw_avg < 40 OR lw_avg > 700 THEN 2
+                     ELSE 9 END AS lw_r1,
+                CASE WHEN lw_avg IS NULL THEN 5
+                     WHEN lw_avg < 60 OR lw_avg > 500 THEN 2
+                     ELSE 9 END AS lw_r2
             """)
-        
-        # PAR radiation validation
+            if "tp_sfc" in colunas_existentes:
+                # 3-algorithm: Alg3 (S-B temp consistency) || Alg2 || Alg1
+                # Alg3 = 5 when any temp algorithm fires (temp reference unreliable)
+                # Alg3 never = 2, so no cascade from Alg3 into Alg2
+                sel_cols.append("""
+                    lw_avg,
+                    CAST(
+                        CASE WHEN lw_avg IS NULL THEN 5
+                             WHEN tp_r1_lw = 2 OR tp_r2_lw = 2 OR tp_r3_lw = 2 THEN 5
+                             ELSE 9 END
+                    AS VARCHAR) ||
+                    CAST(lw_r2 AS VARCHAR) ||
+                    CAST(CASE WHEN lw_r2 = 2 THEN 2 ELSE lw_r1 END AS VARCHAR) AS lw_avg_dqc
+                """)
+            else:
+                # 2-algorithm fallback when tp_sfc not available: leading '0' placeholder
+                sel_cols.append("""
+                    lw_avg,
+                    '0' ||
+                    CAST(lw_r2 AS VARCHAR) ||
+                    CAST(CASE WHEN lw_r2 = 2 THEN 2 ELSE lw_r1 END AS VARCHAR) AS lw_avg_dqc
+                """)
+
         if "par_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 par_avg,
-                CAST(
-                    CASE
-                        WHEN par_avg IS NULL OR par_std IS NULL THEN 5
-                        WHEN par_std = 0 THEN 2
-                        WHEN par_avg < -4 OR par_avg > (2.07 * (Sa * 1.5 * POWER(mu0, 1.2) + 100)) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN par_avg IS NULL THEN 5
-                        WHEN par_avg < -2 OR par_avg > (2.07 * (Sa * 1.2 * POWER(mu0, 1.2) + 50)) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) AS par_avg_dqc
+                CASE WHEN par_avg IS NULL OR par_std IS NULL THEN 5
+                     WHEN par_std = 0 THEN 2
+                     WHEN par_avg < -4 OR par_avg > (2.07 * (Sa * 1.5 * POWER(mu0, 1.2) + 100)) THEN 2
+                     ELSE 9 END AS par_r1,
+                CASE WHEN par_avg IS NULL THEN 5
+                     WHEN par_avg < -2 OR par_avg > (2.07 * (Sa * 1.2 * POWER(mu0, 1.2) + 50)) THEN 2
+                     ELSE 9 END AS par_r2
             """)
-        
-        # Lux validation
+            sel_cols.append("""
+                par_avg,
+                '0' ||
+                CAST(par_r2 AS VARCHAR) ||
+                CAST(CASE WHEN par_r2 = 2 THEN 2 ELSE par_r1 END AS VARCHAR) AS par_avg_dqc
+            """)
+
         if "lux_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 lux_avg,
-                CAST(
-                    CASE
-                        WHEN lux_avg IS NULL OR lux_std IS NULL THEN 5
-                        WHEN lux_std = 0 THEN 2
-                        WHEN lux_avg < -4 OR lux_avg > (0.1125 * (Sa * 1.5 * POWER(mu0, 1.2) + 100)) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE
-                        WHEN lux_avg IS NULL THEN 5
-                        WHEN lux_avg < -2 OR lux_avg > (0.1125 * (Sa * 0.95 * POWER(mu0, 1.2) + 50)) THEN 2
-                        ELSE 9
-                    END AS VARCHAR
-                ) AS lux_avg_dqc
+                CASE WHEN lux_avg IS NULL OR lux_std IS NULL THEN 5
+                     WHEN lux_std = 0 THEN 2
+                     WHEN lux_avg < -4 OR lux_avg > (0.1125 * (Sa * 1.5 * POWER(mu0, 1.2) + 100)) THEN 2
+                     ELSE 9 END AS lux_r1,
+                CASE WHEN lux_avg IS NULL THEN 5
+                     WHEN lux_avg < -2 OR lux_avg > (0.1125 * (Sa * 0.95 * POWER(mu0, 1.2) + 50)) THEN 2
+                     ELSE 9 END AS lux_r2
             """)
-        
-        if not validation_columns:
+            sel_cols.append("""
+                lux_avg,
+                '0' ||
+                CAST(lux_r2 AS VARCHAR) ||
+                CAST(CASE WHEN lux_r2 = 2 THEN 2 ELSE lux_r1 END AS VARCHAR) AS lux_avg_dqc
+            """)
+
+        if not cte_cols:
             print("Nenhuma coluna solar encontrada para validação")
             return
-        
-        # Create optimized single-query validation
+
         sql = f"""
         CREATE OR REPLACE TABLE {self.tabela_destino} AS
-        SELECT 
-            acronym,
-            timestamp,
-            year,
-            day,
-            min,
-            {', '.join(validation_columns)}
-        FROM {self.tabela_origem}
+        WITH raw AS (
+            SELECT
+                acronym, timestamp, year, day, min,
+                {", ".join(cte_cols)}
+            FROM {self.tabela_origem}
+        )
+        SELECT
+            acronym, timestamp, year, day, min,
+            {", ".join(sel_cols)}
+        FROM raw
         """
-        
+
         print("Executando validação solarimétrica otimizada...")
         self.con.execute(sql)
         print(f"Validação solarimétrica concluída. Resultados salvos em {self.tabela_destino}")
-    
-    
+
+
 ##SEM VARIAVEIS    
 # # -------------------------
 # # CLASSE DE VALIDAÇÃO SOLARIMÉTRICA
@@ -1149,130 +1159,158 @@ class MeteoValidator:
     # Execução das validações
     # -------------------------
     def run_all(self):
-        """Optimized meteorological validation that processes all variables in a single query"""
+        """Meteo validation with reversed DQC order, cascade, and '0' placeholder.
+
+        DQC digit layout (per variable):
+          3-alg (temp, ws, wd, rain): pos1=Alg3 | pos2=Alg2 | pos3=Alg1 | pos4='0'
+          2-alg (press):              pos1=Alg2 | pos2=Alg1 | pos3='0'
+          1-alg (humid):              pos1=Alg1 | pos2='0'
+
+        Cascade: flag=2 at position N forces position N+1 to 2.
+                 flag=5 does NOT cascade.
+        """
         print("=== INICIANDO VALIDAÇÕES METEOROLÓGICAS OTIMIZADAS ===")
-        
-        # Check which columns exist
-        colunas_existentes = self.con.execute(f"PRAGMA table_info('{self.tabela_origem}')").fetch_df()['name'].tolist()
-        
-        # Build dynamic validation query for all meteorological variables at once
-        validation_columns = []
-        
-        # Temperature validation
+
+        colunas_existentes = self.con.execute(
+            f"PRAGMA table_info('{self.tabela_origem}')"
+        ).fetch_df()['name'].tolist()
+
+        cte_cols = []   # raw algorithm columns computed inside the CTE
+        sel_cols = []   # final DQC columns with cascade in the outer SELECT
+
         if "tp_sfc" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 CAST(tp_sfc AS DOUBLE) AS temp_avg,
-                CAST(
-                    CASE WHEN tp_sfc IS NULL THEN 5
-                         WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2 ELSE 9 END AS VARCHAR
-                ) AS temp_avg_dqc
+                CASE WHEN tp_sfc IS NULL THEN 5
+                     WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2
+                     ELSE 9 END AS tp_r1,
+                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
+                     ELSE 9 END AS tp_r2,
+                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                     ELSE 9 END AS tp_r3
             """)
-        
-        # Humidity validation
+            sel_cols.append("""
+                temp_avg,
+                CAST(tp_r3 AS VARCHAR) ||
+                CAST(CASE WHEN tp_r3 = 2 THEN 2 ELSE tp_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN tp_r3 = 2 OR tp_r2 = 2 THEN 2 ELSE tp_r1 END AS VARCHAR) AS temp_avg_dqc
+            """)
+
         if "humid" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 humid AS rh_avg,
-                CASE WHEN humid >= 0 AND humid <= 100 THEN '9' ELSE '5' END AS rh_avg_dqc
+                CASE WHEN humid >= 0 AND humid <= 100 THEN 9 ELSE 5 END AS rh_r1
             """)
-        
-        # Pressure validation
+            sel_cols.append("""
+                rh_avg,
+                '00' || CAST(rh_r1 AS VARCHAR) AS rh_avg_dqc
+            """)
+
         if "press" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 CAST(press AS DOUBLE) AS press_avg,
-                CAST(
-                    CASE WHEN press IS NULL THEN 5
-                         WHEN press < press_min OR press > press_max THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(press - LAG(press, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(press - LAG(press, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) < 6 THEN 2 ELSE 9 END AS VARCHAR
-                ) AS press_avg_dqc
+                CASE WHEN press IS NULL THEN 5
+                     WHEN press < press_min OR press > press_max THEN 2
+                     ELSE 9 END AS press_r1,
+                CASE WHEN ABS(press - LAG(press, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(press - LAG(press, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) < 6 THEN 2
+                     ELSE 9 END AS press_r2
             """)
-        
-        # Wind speed validation
+            sel_cols.append("""
+                press_avg,
+                '0' ||
+                CAST(press_r2 AS VARCHAR) ||
+                CAST(CASE WHEN press_r2 = 2 THEN 2 ELSE press_r1 END AS VARCHAR) AS press_avg_dqc
+            """)
+
         if "ws10_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 CAST(ws10_avg AS DOUBLE) AS ws_avg,
-                CAST(
-                    CASE WHEN ws10_avg IS NULL THEN 5
-                         WHEN ws10_avg < 0 OR ws10_avg > 25 THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(ws10_avg - LAG(ws10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(ws10_avg - LAG(ws10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.1 THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(ws10_avg - LAG(ws10_avg, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(ws10_avg - LAG(ws10_avg, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2 ELSE 9 END AS VARCHAR
-                ) AS ws_avg_dqc
+                CASE WHEN ws10_avg IS NULL THEN 5
+                     WHEN ws10_avg < 0 OR ws10_avg > 25 THEN 2
+                     ELSE 9 END AS ws_r1,
+                CASE WHEN ABS(ws10_avg - LAG(ws10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(ws10_avg - LAG(ws10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.1 THEN 2
+                     ELSE 9 END AS ws_r2,
+                CASE WHEN ABS(ws10_avg - LAG(ws10_avg, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(ws10_avg - LAG(ws10_avg, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                     ELSE 9 END AS ws_r3
             """)
-        
-        # Wind direction validation
+            sel_cols.append("""
+                ws_avg,
+                CAST(ws_r3 AS VARCHAR) ||
+                CAST(CASE WHEN ws_r3 = 2 THEN 2 ELSE ws_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN ws_r3 = 2 OR ws_r2 = 2 THEN 2 ELSE ws_r1 END AS VARCHAR) AS ws_avg_dqc
+            """)
+
         if "wd10_avg" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 CAST(wd10_avg AS DOUBLE) AS wd_avg,
-                CAST(
-                    CASE WHEN wd10_avg IS NULL THEN 5
-                         WHEN wd10_avg < 0 OR wd10_avg > 360 THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(wd10_avg - LAG(wd10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(wd10_avg - LAG(wd10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 1 THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN ABS(wd10_avg - LAG(wd10_avg, 108) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(wd10_avg - LAG(wd10_avg, 108) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 10 THEN 2 ELSE 9 END AS VARCHAR
-                ) AS wd_avg_dqc
+                CASE WHEN wd10_avg IS NULL THEN 5
+                     WHEN wd10_avg < 0 OR wd10_avg > 360 THEN 2
+                     ELSE 9 END AS wd_r1,
+                CASE WHEN ABS(wd10_avg - LAG(wd10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(wd10_avg - LAG(wd10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 1 THEN 2
+                     ELSE 9 END AS wd_r2,
+                CASE WHEN ABS(wd10_avg - LAG(wd10_avg, 108) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(wd10_avg - LAG(wd10_avg, 108) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 10 THEN 2
+                     ELSE 9 END AS wd_r3
             """)
-        
-        # Precipitation validation
+            sel_cols.append("""
+                wd_avg,
+                CAST(wd_r3 AS VARCHAR) ||
+                CAST(CASE WHEN wd_r3 = 2 THEN 2 ELSE wd_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN wd_r3 = 2 OR wd_r2 = 2 THEN 2 ELSE wd_r1 END AS VARCHAR) AS wd_avg_dqc
+            """)
+
         if "rain" in colunas_existentes:
-            validation_columns.append("""
+            cte_cols.append("""
                 CAST(rain AS DOUBLE) AS rain,
-                CAST(
-                    CASE WHEN rain IS NULL THEN 5
-                         WHEN rain < 0 OR rain > rain_max THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) IS NULL THEN 5
-                         WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) > 25 THEN 2 ELSE 9 END AS VARCHAR
-                ) ||
-                CAST(
-                    CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 143 PRECEDING AND CURRENT ROW) IS NULL THEN 5
-                         WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 143 PRECEDING AND CURRENT ROW) > 100 THEN 2 ELSE 9 END AS VARCHAR
-                ) AS rain_dqc
+                CASE WHEN rain IS NULL THEN 5
+                     WHEN rain < 0 OR rain > rain_max THEN 2
+                     ELSE 9 END AS rain_r1,
+                CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) IS NULL THEN 5
+                     WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) > 25 THEN 2
+                     ELSE 9 END AS rain_r2,
+                CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 143 PRECEDING AND CURRENT ROW) IS NULL THEN 5
+                     WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 143 PRECEDING AND CURRENT ROW) > 100 THEN 2
+                     ELSE 9 END AS rain_r3
             """)
-        
-        if not validation_columns:
+            sel_cols.append("""
+                rain,
+                CAST(rain_r3 AS VARCHAR) ||
+                CAST(CASE WHEN rain_r3 = 2 THEN 2 ELSE rain_r2 END AS VARCHAR) ||
+                CAST(CASE WHEN rain_r3 = 2 OR rain_r2 = 2 THEN 2 ELSE rain_r1 END AS VARCHAR) AS rain_dqc
+            """)
+
+        if not cte_cols:
             print("Nenhuma coluna meteorológica encontrada para validação")
-            return pd.DataFrame()
-        
-        # Create optimized single-query validation
+            return
+
         sql = f"""
         CREATE OR REPLACE TABLE {self.tabela_destino} AS
-        SELECT 
-            acronym,
-            timestamp,
-            EXTRACT(year FROM timestamp) AS year,
-            EXTRACT(day FROM timestamp) AS day,
-            EXTRACT(minute FROM timestamp) AS min,
-            {', '.join(validation_columns)}
-        FROM {self.tabela_origem}
+        WITH raw AS (
+            SELECT
+                acronym,
+                timestamp,
+                EXTRACT(year FROM timestamp) AS year,
+                EXTRACT(day FROM timestamp) AS day,
+                EXTRACT(minute FROM timestamp) AS min,
+                {", ".join(cte_cols)}
+            FROM {self.tabela_origem}
+        )
+        SELECT
+            acronym, timestamp, year, day, min,
+            {", ".join(sel_cols)}
+        FROM raw
         """
-        
+
         print("Executando validação meteorológica otimizada...")
         self.con.execute(sql)
         print(f"Validação meteorológica concluída. Resultados salvos em {self.tabela_destino}")
-        return pd.DataFrame()  # Return empty DF for compatibility
-   
+        return pd.DataFrame()
 
 
 ## SEM VARIAVEIS    

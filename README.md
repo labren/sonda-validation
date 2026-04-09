@@ -1,302 +1,370 @@
 # INPE SONDA Validation System
 
-A comprehensive data validation system for solarimetric and meteorological data from INPE SONDA (Sistema de Organização Nacional de Dados Ambientais) stations.
+Automated quality control and validation system for solarimetric and meteorological data from INPE SONDA (Sistema de Organização Nacional de Dados Ambientais) stations across Brazil.
 
 ## Overview
 
-This project provides automated quality control and validation for solarimetric and meteorological data collected from INPE SONDA weather stations across Brazil. The system performs comprehensive data quality checks using multiple validation algorithms and generates quality control flags (DQC - Data Quality Control) for each measurement.
-
-## Features
-
-### Solarimetric Data Validation
-- **Global Solar Radiation (glo_avg)**: Validates global horizontal irradiance measurements
-- **Direct Solar Radiation (dir_avg)**: Validates direct normal irradiance measurements  
-- **Diffuse Solar Radiation (dif_avg)**: Validates diffuse horizontal irradiance measurements
-- **Longwave Radiation (lw_avg)**: Validates longwave radiation measurements
-- **PAR Radiation (par_avg)**: Validates Photosynthetically Active Radiation measurements
-- **Lux Measurements (lux_avg)**: Validates illuminance measurements
-
-### Meteorological Data Validation
-- **Temperature (temp_avg, temp_max, temp_min)**: Validates air temperature measurements
-- **Relative Humidity (rh_avg)**: Validates humidity measurements
-- **Atmospheric Pressure (press_avg)**: Validates barometric pressure measurements
-- **Wind Speed (ws_avg)**: Validates wind speed measurements
-- **Wind Direction (wd_avg)**: Validates wind direction measurements
-- **Precipitation (rain)**: Validates rainfall measurements
-
-### Quality Control Features
-- **Multi-algorithm validation**: Each variable is validated using multiple algorithms
-- **Climatic normals comparison**: Data is compared against regional climatic normals
-- **Temporal consistency checks**: Validates data consistency over time
-- **Solar geometry calculations**: Automatically calculates solar angles and extraterrestrial radiation
-- **Station metadata integration**: Uses station coordinates and metadata for validation
-
-## Installation
-
-### Prerequisites
-- Python 3.12 or higher
-- UV package manager (recommended) or pip
-
-### Dependencies
-
-The project requires the following Python packages:
-
-```bash
-# Core dependencies
-pandas>=2.0.0
-duckdb>=0.9.0
-numpy>=1.24.0
-
-# Solar calculations
-astral>=3.0.0
-timezonefinder>=6.0.0
-
-# Optional: for better performance
-pyarrow>=12.0.0
-```
-
-### Installation Steps
-
-1. **Clone the repository:**
-```bash
-git clone <repository-url>
-cd sonda-validation
-```
-
-2. **Install dependencies using UV (recommended):**
-```bash
-uv sync
-```
-
-3. **Or install using pip:**
-```bash
-pip install pandas duckdb numpy astral timezonefinder pyarrow
-```
+The system reads station data from Parquet files, computes solar geometry, joins climatic normals, runs per-variable DQC algorithms, and writes monthly validated CSV files per station. Both solarimetric and meteorological variables are validated in a single optimized DuckDB query per domain.
 
 ## Project Structure
 
 ```
 sonda-validation/
-├── main.py                    # Main execution script
-├── pyproject.toml            # Project configuration
-├── uv.lock                   # Dependency lock file
-├── core/                     # Core validation modules
-│   ├── sondaUtils.py         # Utility functions
-│   └── sondaValidator.py     # Validation algorithms
-├── data/                     # Data directory
-│   ├── raw/                  # Input parquet files
-│   └── output/               # Validated data output
-├── INPESONDA_stations.csv    # Station metadata
-├── INPESONDA_normais.csv     # Climatic normals
-└── README.md                 # This file
+├── main.py                        # Main execution script (processes all stations)
+├── pyproject.toml                 # Project configuration and dependencies
+├── uv.lock                        # Dependency lock file
+├── core/
+│   ├── __init__.py
+│   ├── sondaValidator.py          # SolarimetricValidator and MeteoValidator classes
+│   └── sondaUtils.py              # auxFunctions: data loading, preprocessing, orchestration
+├── data/
+│   ├── metadata/
+│   │   ├── INPESONDA_stations.csv # Station coordinates (station, latitude, longitude, altitude)
+│   │   └── INPESONDA_normais.csv  # Climatic normals per station (tp_min/max, press_min/max, rain_max)
+│   ├── raw/                       # Input Parquet files (Solarimetrica-001.parquet)
+│   └── output/                    # Validated output CSVs, organized by station/month
+└── validation.ipynb               # EDA and DQC visualization notebook
+```
+
+## Installation
+
+### Prerequisites
+
+- Python 3.12 or higher
+- UV package manager (recommended) or pip
+
+### Steps
+
+```bash
+# Clone and enter the repository
+git clone <repository-url>
+cd sonda-validation
+
+# Install with UV (recommended)
+uv sync
+
+# Or with pip
+pip install pandas duckdb numpy astral timezonefinder pyarrow
 ```
 
 ## Usage
 
-### Basic Usage
-
-The main script processes all stations in the input parquet file:
+### Run validation for all stations
 
 ```bash
 python main.py
 ```
 
-### Configuration
+`main.py` reads all unique `acronym` values from the Parquet file and calls `rodar_validacao()` for each station sequentially. Outputs a timing summary at the end.
 
-Before running, ensure the following paths are correctly configured in `main.py`:
+### Configuration in `main.py`
 
 ```python
-# Input data file
-PARQUET_FILE = "/path/to/your/Solarimetrica-001.parquet"
-
-# Output directory
-OUTPUT_DIR = "/path/to/output/directory"
-
-# Number of rows to process (None for all data)
-N_ROWS = None
+PARQUET_FILE = os.path.join(SCRIPT_DIR, "data", "raw", "Solarimetrica-001.parquet")
+OUTPUT_DIR   = os.path.join(SCRIPT_DIR, "data", "output")
+N_ROWS = None   # Set to an integer to limit rows (useful for testing)
 ```
 
-### Processing Individual Stations
-
-To process a specific station, modify the main script:
+### Run validation programmatically
 
 ```python
-# Process only one station
-stations = ["SBR"]  # Replace with desired station code
-```
-
-### Custom Validation
-
-You can also use the validation classes directly:
-
-```python
-import duckdb
-from core.sondaValidator import SolarimetricValidator, MeteoValidator
 from core.sondaUtils import auxFunctions
 
-# Initialize database connection
-con = duckdb.connect(database=":memory:")
-
-# Load and preprocess data
-auxFunctions.carregar_dados(con, "path/to/data.parquet")
-# ... additional preprocessing steps
-
-# Run solarimetric validation
-solar_validator = SolarimetricValidator(con, "input_table", "output_table")
-solar_validator.run_solar_validation()
-
-# Run meteorological validation
-meteo_validator = MeteoValidator(con, "input_table", "output_table")
-meteo_validator.run_all()
+aux = auxFunctions()
+aux.rodar_validacao(
+    parquet_file="data/raw/Solarimetrica-001.parquet",
+    OUTPUT_DIR="data/output",
+    n_rows=None,     # None = all rows
+    station="SBR",   # None = all stations in file
+)
 ```
 
-## Data Quality Control (DQC) System
+## Processing Pipeline
 
-The validation system generates DQC flags using a three-digit code system:
+Each station is processed independently:
 
-### DQC Flag Structure
-- **Digit 1**: Algorithm 1 validation result
-- **Digit 2**: Algorithm 2 validation result  
-- **Digit 3**: Algorithm 3 validation result
+1. **Load data** — `carregar_dados()`: reads the Parquet file into a DuckDB in-memory table `solar_raw`, optionally filtered by station, row limit, or random sample.
+2. **Preprocess** — `preprocess_conversion_data_fill_time()`: casts all measurement columns to `DOUBLE`, fills the time series to a regular 10-minute grid (inserting `NULL` rows for missing intervals), and flags complete rows with a `valid` boolean.
+3. **Join metadata** — creates table `solar_with_meta` by joining:
+   - `INPESONDA_stations.csv` → adds `latitude`, `longitude`
+   - `INPESONDA_normais.csv` → adds `tp_min`, `tp_max`, `press_min`, `press_max`, `rain_max`
+4. **Solar geometry** — `add_mu0_to_duckdb()`: computes per-row solar cosine zenith angle `mu0` and solar azimuth `azs` using the `astral` library. Processes in adaptive chunks (25K–100K rows) to control memory. Timezone is auto-detected from station coordinates via `timezonefinder`.
+5. **Extraterrestrial radiation** — `add_sa_sum()`: adds columns:
+   - `Sa = S0 / UA²` where `S0 = 1361 W/m²` (solar constant) and `UA = 1.0` AU
+   - `Sum = dif_avg + dir_avg × mu0` (theoretical global from components)
+6. **Solar validation** — `SolarimetricValidator.run_solar_validation()`: builds a single DuckDB `CREATE TABLE AS SELECT` that computes DQC flags for all present solar columns in one query pass.
+7. **Meteorological validation** — `MeteoValidator.run_all()`: same pattern — single-query validation for all present meteorological columns.
+8. **Consolidation** — merges the two validated tables (`solar_validated_solar` + `solar_validated_meteo`) with a `FULL OUTER JOIN` on `(acronym, timestamp)` into `final_consolidated`.
+9. **Output** — saves one semicolon-delimited CSV per calendar month into `data/output/<station>/solar_validated_<station>_<YYYY-MM>.csv`.
 
-### DQC Flag Values
-- **9**: Data passed validation (good quality)
-- **2**: Data failed validation (suspicious/flagged)
-- **5**: Data missing or insufficient for validation
+## Validation Algorithms
 
-### Example DQC Codes
-- `999`: All algorithms passed - highest quality
-- `992`: First two algorithms passed, third flagged
-- `555`: All data missing
-- `222`: All algorithms flagged - lowest quality
+### DQC Flag System
+
+Each validated variable receives a DQC code: a 2- or 3-character string, one digit per algorithm.
+
+| Digit value | Meaning |
+|-------------|---------|
+| `9` | Passed validation (good quality) |
+| `2` | Failed validation (suspicious/flagged) |
+| `5` | Missing data or insufficient context for validation |
+
+Examples: `999` = all three algorithms passed; `295` = algorithm 1 passed, algorithm 2 flagged, algorithm 3 insufficient data; `55` = both algorithms have missing data.
+
+---
+
+### Solarimetric Variables
+
+Input columns require both `*_avg` and `*_std` (standard deviation within the 10-minute interval). A zero standard deviation (`std = 0`) triggers a flag (`2`) on the first algorithm, indicating a stuck sensor.
+
+#### Global Horizontal Irradiance — `glo_avg` → `glo_avg_dqc` (3 digits)
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `NULL`/`NULL std` → 5; `std = 0` → 2; `glo_avg < -4` or `> Sa × 1.5 × mu0^1.2 + 100` → 2 | Physically possible limit |
+| 2 | `NULL` → 5; `glo_avg < -2` or `> Sa × 1.2 × mu0^1.2 + 50` → 2 | Extremely rare limit |
+| 3 | `NULL` or `Sum ≤ 50` → 5; `azs < 75°` and `|glo_avg/Sum - 1| > 0.10` → 2; `75° ≤ azs < 93°` and `> 0.15` → 2 | Component consistency (relaxed near horizon) |
+
+#### Direct Normal Irradiance — `dir_avg` → `dir_avg_dqc` (3 digits)
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `NULL`/`NULL std` → 5; `std = 0` → 2; `dir_avg < -4` or `> Sa` → 2 | Physically possible limit |
+| 2 | `NULL` → 5; `dir_avg < -2` or `> Sa × 0.95 × mu0^0.2 + 10` → 2 | Extremely rare limit |
+| 3 | `NULL` → 5; `(dir_avg × mu0 - 50) > (glo_avg - dir_avg)` or `(glo_avg - dir_avg) > (dir_avg × mu0 + 50)` → 2 | Diffuse component consistency |
+
+#### Diffuse Horizontal Irradiance — `dif_avg` → `dif_avg_dqc` (3 digits)
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `NULL`/`NULL std` → 5; `std = 0` → 2; `dif_avg < -4` or `> Sa × 0.95 × mu0^1.2 + 50` → 2 | Physically possible limit |
+| 2 | `NULL` → 5; `dif_avg < -2` or `> Sa × 0.75 × mu0^1.2 + 30` → 2 | Extremely rare limit |
+| 3 | `NULL` or `glo_avg ≤ 50` → 5; `azs < 75°` and `dif_avg / glo_avg > 1.05` → 2; `75° ≤ azs < 93°` and `> 1.10` → 2 | Diffuse fraction check |
+
+#### Longwave Radiation — `lw_avg` → `lw_avg_dqc` (2 digits)
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `NULL`/`NULL std` → 5; `std = 0` → 2; `lw_avg < 40` or `> 700` → 2 | Physically possible limit (W/m²) |
+| 2 | `NULL` → 5; `lw_avg < 60` or `> 500` → 2 | Extremely rare limit |
+
+#### PAR Radiation — `par_avg` → `par_avg_dqc` (2 digits)
+
+Limits scaled from solar irradiance using a conversion factor of **2.07** (µmol/m²/s per W/m²).
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `NULL`/`NULL std` → 5; `std = 0` → 2; `par_avg < -4` or `> 2.07 × (Sa × 1.5 × mu0^1.2 + 100)` → 2 | Physically possible limit |
+| 2 | `NULL` → 5; `par_avg < -2` or `> 2.07 × (Sa × 1.2 × mu0^1.2 + 50)` → 2 | Extremely rare limit |
+
+#### Illuminance — `lux_avg` → `lux_avg_dqc` (2 digits)
+
+Limits scaled from solar irradiance using a conversion factor of **0.1125** (klux per W/m²).
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `NULL`/`NULL std` → 5; `std = 0` → 2; `lux_avg < -4` or `> 0.1125 × (Sa × 1.5 × mu0^1.2 + 100)` → 2 | Physically possible limit |
+| 2 | `NULL` → 5; `lux_avg < -2` or `> 0.1125 × (Sa × 0.95 × mu0^1.2 + 50)` → 2 | Extremely rare limit |
+
+---
+
+### Meteorological Variables
+
+Limits (`tp_min`, `tp_max`, `press_min`, `press_max`, `rain_max`) come from `INPESONDA_normais.csv`, joined per station. Temporal checks use DuckDB window functions with `LAG()` partitioned by station.
+
+**Note on source column names:** the Parquet file uses `tp_sfc`, `humid`, `press`, `ws10_avg`, `wd10_avg`, and `rain`. The output CSV renames them to `temp_avg`, `rh_avg`, `press_avg`, `ws_avg`, `wd_avg`, and `rain`.
+
+#### Temperature — `tp_sfc` → `temp_avg` / `temp_avg_dqc` (3 digits)
+
+| Alg | Window | Check | Flag |
+|-----|--------|-------|------|
+| 1 | — | `NULL` → 5; `tp_sfc < tp_min` or `> tp_max` → 2 | Climatic normals bounds |
+| 2 | 6 steps back (1 h) | `NULL diff` → 5; `|Δ1h| ≥ 5 °C` → 2 | Unrealistic short-term jump |
+| 3 | 72 steps back (12 h) | `NULL diff` → 5; `|Δ12h| ≤ 0.5 °C` → 2 | Persistence / stuck sensor |
+
+#### Relative Humidity — `humid` → `rh_avg` / `rh_avg_dqc` (1 digit)
+
+| Alg | Check | Flag |
+|-----|-------|------|
+| 1 | `humid ≥ 0` and `≤ 100` → 9; otherwise → 5 | Physical range |
+
+#### Atmospheric Pressure — `press` → `press_avg` / `press_avg_dqc` (2 digits)
+
+| Alg | Window | Check | Flag |
+|-----|--------|-------|------|
+| 1 | — | `NULL` → 5; `press < press_min` or `> press_max` → 2 | Climatic normals bounds |
+| 2 | 18 steps back (3 h) | `NULL diff` → 5; `|Δ3h| < 6 hPa` → 2 | Insufficient variation (stuck) |
+
+#### Wind Speed — `ws10_avg` → `ws_avg` / `ws_avg_dqc` (3 digits)
+
+| Alg | Window | Check | Flag |
+|-----|--------|-------|------|
+| 1 | — | `NULL` → 5; `ws10_avg < 0` or `> 25 m/s` → 2 | Physical range |
+| 2 | 18 steps back (3 h) | `NULL diff` → 5; `|Δ3h| ≤ 0.1 m/s` → 2 | Persistence check |
+| 3 | 72 steps back (12 h) | `NULL diff` → 5; `|Δ12h| ≤ 0.5 m/s` → 2 | Long-term persistence |
+
+#### Wind Direction — `wd10_avg` → `wd_avg` / `wd_avg_dqc` (3 digits)
+
+| Alg | Window | Check | Flag |
+|-----|--------|-------|------|
+| 1 | — | `NULL` → 5; `wd10_avg < 0°` or `> 360°` → 2 | Physical range |
+| 2 | 18 steps back (3 h) | `NULL diff` → 5; `|Δ3h| ≤ 1°` → 2 | Persistence check |
+| 3 | 108 steps back (18 h) | `NULL diff` → 5; `|Δ18h| ≤ 10°` → 2 | Long-term persistence |
+
+#### Precipitation — `rain` → `rain` / `rain_dqc` (3 digits)
+
+| Alg | Window | Check | Flag |
+|-----|--------|-------|------|
+| 1 | — | `NULL` → 5; `rain < 0` or `> rain_max` → 2 | Climatic normals ceiling |
+| 2 | 6 rows (1 h accumulation) | `NULL sum` → 5; `Σ1h > 25 mm` → 2 | Hourly accumulation limit |
+| 3 | 144 rows (24 h accumulation) | `NULL sum` → 5; `Σ24h > 100 mm` → 2 | Daily accumulation limit |
+
+---
 
 ## Input Data Format
 
-### Required Parquet File Structure
-The input parquet file should contain the following columns:
+### Parquet File
 
-**Station Information:**
-- `acronym`: Station identifier (string)
-- `timestamp`: Measurement timestamp (datetime)
+Required columns:
 
-**Solarimetric Variables (optional):**
-- `glo_avg`, `glo_std`: Global solar radiation (W/m²)
-- `dir_avg`, `dir_std`: Direct solar radiation (W/m²)
-- `dif_avg`, `dif_std`: Diffuse solar radiation (W/m²)
-- `lw_avg`, `lw_std`: Longwave radiation (W/m²)
-- `par_avg`, `par_std`: PAR radiation (μmol/m²/s)
-- `lux_avg`, `lux_std`: Illuminance (lux)
+| Column | Type | Description |
+|--------|------|-------------|
+| `acronym` | string | Station identifier (e.g., `SBR`, `NAT`) |
+| `timestamp` | datetime | Measurement timestamp (UTC, 10-minute resolution) |
 
-**Meteorological Variables (optional):**
-- `temp_avg`, `temp_max`, `temp_min`: Air temperature (°C)
-- `rh_avg`: Relative humidity (%)
-- `press_avg`: Atmospheric pressure (hPa)
-- `ws_avg`: Wind speed (m/s)
-- `wd_avg`: Wind direction (degrees)
-- `rain`: Precipitation (mm)
+Optional solarimetric columns (validated if present):
+
+| Column | Unit | Description |
+|--------|------|-------------|
+| `glo_avg`, `glo_std` | W/m² | Global horizontal irradiance |
+| `dir_avg`, `dir_std` | W/m² | Direct normal irradiance |
+| `dif_avg`, `dif_std` | W/m² | Diffuse horizontal irradiance |
+| `lw_avg`, `lw_std` | W/m² | Longwave radiation |
+| `par_avg`, `par_std` | µmol/m²/s | Photosynthetically Active Radiation |
+| `lux_avg`, `lux_std` | klux | Illuminance |
+
+Optional meteorological columns (validated if present):
+
+| Column | Unit | Description |
+|--------|------|-------------|
+| `tp_sfc` | °C | Air temperature at surface |
+| `humid` | % | Relative humidity |
+| `press` | hPa | Atmospheric pressure |
+| `ws10_avg` | m/s | Wind speed at 10 m |
+| `wd10_avg` | ° | Wind direction at 10 m |
+| `rain` | mm | Precipitation |
+
+### Metadata Files
+
+**`data/metadata/INPESONDA_stations.csv`** — comma-separated:
+```
+station,latitude,longitude,altitude
+SBR,-15.601,-47.713,1023
+...
+```
+
+**`data/metadata/INPESONDA_normais.csv`** — semicolon-separated:
+```
+acronym;tp_min;tp_max;press_min;press_max;rain_max
+SBR;12.0;32.0;880.0;960.0;150
+...
+```
 
 ## Output Format
 
-### File Structure
-Validated data is saved as CSV files organized by station and month:
+Monthly CSV files per station, semicolon-delimited:
 
 ```
-output/
+data/output/
 ├── SBR/
 │   ├── solar_validated_SBR_2024-01.csv
 │   ├── solar_validated_SBR_2024-02.csv
 │   └── ...
 ├── NAT/
-│   ├── solar_validated_NAT_2024-01.csv
 │   └── ...
-└── ...
 ```
 
-### Output File Format
-Each output CSV file contains all data for a specific station and month:
-- Original measurement values
-- Corresponding DQC flags for each variable
-- Station metadata (latitude, longitude)
-- Temporal information (year, day, minute)
+### Output Columns
 
-**Note**: Files are organized by month (YYYY-MM format) rather than daily files to reduce the number of output files and improve data management.
-
-**Example output columns:**
 ```
-acronym,timestamp,year,day,min,glo_avg,glo_avg_dqc,dir_avg,dir_avg_dqc,temp_avg,temp_avg_dqc,...
-SBR,2024-01-01 00:00:00,2024,1,0,0.0,555,0.0,555,25.3,999,...
-SBR,2024-01-01 00:10:00,2024,1,10,150.2,999,120.5,999,25.1,999,...
-SBR,2024-01-01 00:20:00,2024,1,20,280.7,999,200.3,999,24.8,999,...
-...
+acronym;timestamp;year;day;min;
+glo_avg;glo_avg_dqc;
+dir_avg;dir_avg_dqc;
+dif_avg;dif_avg_dqc;
+lw_avg;lw_avg_dqc;
+par_avg;par_avg_dqc;
+lux_avg;lux_avg_dqc;
+temp_avg;temp_avg_dqc;
+rh_avg;rh_avg_dqc;
+press_avg;press_avg_dqc;
+ws_avg;ws_avg_dqc;
+wd_avg;wd_avg_dqc;
+rain;rain_dqc
 ```
 
-## Validation Algorithms
+Columns are only present if the corresponding source column existed in the input Parquet file.
 
-### Solarimetric Validation
-1. **Range Validation**: Checks if values are within physically reasonable limits
-2. **Extraterrestrial Comparison**: Compares with calculated extraterrestrial radiation
-3. **Component Consistency**: Validates relationships between global, direct, and diffuse radiation
+### Example rows
 
-### Meteorological Validation
-1. **Climatic Normals**: Compares against regional climatic normals
-2. **Temporal Consistency**: Checks for unrealistic temporal variations
-3. **Physical Limits**: Validates against known physical constraints
+```
+acronym;timestamp;year;day;min;glo_avg;glo_avg_dqc;dir_avg;dir_avg_dqc;...
+SBR;2024-01-01 00:00:00;2024;1;0;0.0;555;0.0;555;...
+SBR;2024-01-01 06:10:00;2024;1;370;850.3;999;620.1;999;...
+SBR;2024-01-01 06:20:00;2024;1;380;-5.1;299;0.0;999;...
+```
 
-## Performance Considerations
+## Validation Notebook (`validation.ipynb`)
 
-### Memory Management
-- The system uses DuckDB for efficient in-memory processing
-- Data is processed in chunks to manage memory usage
-- Automatic garbage collection is performed after processing
+Jupyter notebook for exploratory analysis of validated output:
 
-### Optimization Settings
+- Reads a monthly CSV from `data/output/`
+- Filters by date range
+- Plots time series of any variable (e.g., `glo_avg`)
+- **DQC heatmap**: 2D grid of days × time-of-day for each DQC column — blue cells = `999`/`99` (good data), red cells = any other code (suspect or missing)
+- Prints per-variable DQC distribution and data availability percentage
+
+## Performance
+
+- **DuckDB in-memory**: all processing done in DuckDB without writing intermediate files
+- **Single-query validation**: both solar and meteo validations use a single `CREATE TABLE AS SELECT` with all algorithm `CASE` expressions evaluated in one pass
+- **Chunked solar angle calculation**: `mu0`/`azs` computed in chunks of 25K–100K rows (adaptive based on dataset size) to prevent memory exhaustion
+- **Per-station isolation**: each station uses its own DuckDB connection, closed and garbage-collected after processing
+
+### DuckDB settings (applied per station)
+
 ```python
-# DuckDB optimization settings
-con.execute("PRAGMA max_temp_directory_size='100GB'")
-con.execute("SET memory_limit='32GB'")
-con.execute("SET threads=4")
+SET memory_limit = '16GB'
+SET threads = 4
+SET preserve_insertion_order = false
+SET enable_object_cache = true
 ```
 
 ## Troubleshooting
 
-### Common Issues
+**`FileNotFoundError` for metadata CSVs** — the system looks in `data/metadata/` first, then falls back to the project root. Ensure `INPESONDA_stations.csv` and `INPESONDA_normais.csv` are in `data/metadata/`.
 
-1. **File Not Found Errors**
-   - Ensure the parquet file path is correct
-   - Check that station metadata files are in the project root
+**Missing latitude/longitude after join** — the `acronym` in the Parquet file must match the `station` column in `INPESONDA_stations.csv` (case-insensitive, whitespace-trimmed).
 
-2. **Memory Issues**
-   - Reduce `N_ROWS` parameter for testing
-   - Increase system memory or reduce chunk sizes
+**Memory issues** — reduce `N_ROWS` in `main.py` for testing, or reduce chunk size in `add_mu0_to_duckdb()`.
 
-3. **Missing Dependencies**
-   - Install all required packages using `uv sync` or `pip install -r requirements.txt`
+**Timezone detection failure** — `timezonefinder` requires valid coordinates. Check that the station exists in `INPESONDA_stations.csv` with non-null latitude/longitude.
 
-4. **Timezone Issues**
-   - The system automatically detects timezones using coordinates
-   - Ensure station coordinates are accurate in the metadata file
+## Dependencies
 
-### Debug Mode
-To run with verbose output, modify the main script to include debug prints or use Python's logging module.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+| Package | Purpose |
+|---------|---------|
+| `duckdb` | In-memory SQL engine for all data processing |
+| `pandas` | DataFrame handling for metadata and chunked updates |
+| `numpy` | Numeric operations in solar angle calculations |
+| `astral` | Solar elevation and azimuth calculations |
+| `timezonefinder` | Automatic timezone detection from coordinates |
+| `pyarrow` | Parquet file reading |
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
-
-## Contact
-
-For questions or support, please contact the INPE SONDA team or create an issue in the repository.
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
 - INPE (Instituto Nacional de Pesquisas Espaciais)
 - SONDA (Sistema de Organização Nacional de Dados Ambientais)
-- Brazilian meteorological and solarimetric data collection network
