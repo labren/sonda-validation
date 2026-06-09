@@ -1,7 +1,9 @@
 """
 DQC Comparison Script
 =====================
-Runs the validator on CPA1812ED.csv and compares output against CPA1812ED_DQC.csv.
+Runs the validator on CPA1811ED.csv and compares output against CPA1811ED_DQC.csv.
+Climatic normals are sourced from INPESONDA_normais_climatology.csv (station-specific,
+±20% margins derived from sonda_climatology.csv) instead of the uniform sea-level defaults.
 
 Usage (from project root):
     python data/DQC/compare_dqc.py
@@ -32,10 +34,10 @@ sys.path.insert(0, PROJECT_DIR)
 
 from core.sondaValidator import SolarimetricValidator, MeteoValidator
 
-INPUT_CSV    = os.path.join(SCRIPT_DIR, "CPA1812ED.csv")
-REF_CSV      = os.path.join(SCRIPT_DIR, "CPA1812ED_DQC.csv")
+INPUT_CSV    = os.path.join(SCRIPT_DIR, "CPA1811ED.csv")
+REF_CSV      = os.path.join(SCRIPT_DIR, "CPA1811ED_DQC.csv")
 STATIONS_CSV = os.path.join(PROJECT_DIR, "data", "metadata", "INPESONDA_stations.csv")
-NORMAIS_CSV  = os.path.join(PROJECT_DIR, "data", "metadata", "INPESONDA_normais.csv")
+NORMAIS_CSV  = os.path.join(PROJECT_DIR, "data", "metadata", "INPESONDA_normais_climatology.csv")
 
 # ── column definitions ────────────────────────────────────────────────────────
 # Raw ED file columns (datetm was removed from the old header)
@@ -130,7 +132,7 @@ def run_validation(df_input):
     con = duckdb.connect(":memory:")
     con.execute("CREATE TABLE solar_with_meta AS SELECT * FROM df_input")
 
-    sv = SolarimetricValidator(con, "solar_with_meta", "solar_out")
+    sv = SolarimetricValidator(con, "solar_with_meta", "solar_out", freq_min=1)
 
     print("  Computing solar geometry (mu0, azs)...")
     sv.add_mu0_to_duckdb(con=con, table_name="solar_with_meta")
@@ -142,7 +144,7 @@ def run_validation(df_input):
     sv.run_solar_validation()
 
     print("  Running meteo validation...")
-    mv = MeteoValidator(con, "solar_with_meta", "meteo_out")
+    mv = MeteoValidator(con, "solar_with_meta", "meteo_out", freq_min=1)
     mv.run_all()
 
     tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]

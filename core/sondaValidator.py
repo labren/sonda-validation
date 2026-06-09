@@ -5,10 +5,12 @@ import numpy as np
 
 
 class SolarimetricValidator:
-    def __init__(self, con, tabela_origem: str, tabela_destino: str):
+    def __init__(self, con, tabela_origem: str, tabela_destino: str, freq_min: int = 10):
         self.con = con
         self.tabela_origem = tabela_origem
         self.tabela_destino = tabela_destino
+        self.lag_1h  = round(60  / freq_min)
+        self.lag_12h = round(720 / freq_min)
 
     def coluna_existe(self, coluna: str) -> bool:
         colunas = {c[1].lower() for c in self.con.execute(f"PRAGMA table_info('{self.tabela_origem}')").fetchall()}
@@ -481,21 +483,26 @@ class SolarimetricValidator:
             """)
 
         if "dir_avg" in colunas_existentes:
-            cte_cols.append("""
+            has_dif = "dif_avg" in colunas_existentes and "glo_avg" in colunas_existentes
+            dir_r3_sql = (
+                """CASE WHEN dir_avg IS NULL OR glo_avg IS NULL THEN 5
+                     WHEN dir_avg <= 0 THEN 9
+                     WHEN glo_avg <= 50 THEN 5
+                     WHEN dif_avg IS NULL THEN 5
+                     WHEN ABS(glo_avg - dir_avg * mu0 - dif_avg) / glo_avg > 0.10 THEN 2
+                     ELSE 9 END AS dir_r3"""
+                if has_dif else "5 AS dir_r3"
+            )
+            cte_cols.append(f"""
                 dir_avg,
                 CASE WHEN dir_avg IS NULL OR dir_std IS NULL THEN 5
                      WHEN dir_std = 0 THEN 2
-                     WHEN dir_avg < -4 OR dir_avg > Sa THEN 2
+                     WHEN dir_avg < -2 OR dir_avg > Sa THEN 2
                      ELSE 9 END AS dir_r1,
                 CASE WHEN dir_avg IS NULL THEN 5
                      WHEN dir_avg < -2 OR dir_avg > (Sa * 0.95 * POWER(mu0, 0.2) + 10) THEN 2
                      ELSE 9 END AS dir_r2,
-                CASE WHEN dir_avg IS NULL THEN 5
-                     WHEN dir_avg <= 0 THEN 9
-                     WHEN (dir_avg * mu0 - 50) > (glo_avg - dir_avg)
-                       OR (glo_avg - dir_avg) > (dir_avg * mu0 + 50)
-                     THEN 2
-                     ELSE 9 END AS dir_r3
+                {dir_r3_sql}
             """)
             sel_cols.append("""
                 dir_avg,
@@ -530,15 +537,15 @@ class SolarimetricValidator:
         if "lw_avg" in colunas_existentes:
             if "tp_sfc" in colunas_existentes:
                 # Raw temp flags — used by lw Alg3 (Stefan-Boltzmann consistency)
-                cte_cols.append("""
+                cte_cols.append(f"""
                     CASE WHEN tp_sfc IS NULL THEN 5
                          WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2
                          ELSE 9 END AS tp_r1_lw,
-                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
+                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                         WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
                          ELSE 9 END AS tp_r2_lw,
-                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                         WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
                          ELSE 9 END AS tp_r3_lw
                 """)
             cte_cols.append("""
@@ -898,10 +905,16 @@ class SolarimetricValidator:
 # CLASSE COMPLETA DE VALIDAÇÃO METEOROLÓGICA
 # -------------------------
 class MeteoValidator:
-    def __init__(self, con, tabela_origem: str, tabela_destino: str):
+    def __init__(self, con, tabela_origem: str, tabela_destino: str, freq_min: int = 10):
         self.con = con
         self.tabela_origem = tabela_origem
         self.tabela_destino = tabela_destino
+        self.lag_1h       = round(60   / freq_min)
+        self.lag_3h       = round(180  / freq_min)
+        self.lag_12h      = round(720  / freq_min)
+        self.lag_18h      = round(1080 / freq_min)
+        self.lag_1h_rain  = self.lag_1h - 1
+        self.lag_24h_rain = round(1440 / freq_min) - 1
 
     def coluna_existe(self, coluna: str) -> bool:
         colunas = {c[1].lower() for c in self.con.execute(f"PRAGMA table_info('{self.tabela_origem}')").fetchall()}
@@ -1179,16 +1192,16 @@ class MeteoValidator:
         sel_cols = []   # final DQC columns with cascade in the outer SELECT
 
         if "tp_sfc" in colunas_existentes:
-            cte_cols.append("""
+            cte_cols.append(f"""
                 CAST(tp_sfc AS DOUBLE) AS temp_avg,
                 CASE WHEN tp_sfc IS NULL THEN 5
                      WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2
                      ELSE 9 END AS tp_r1,
-                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(tp_sfc - LAG(tp_sfc, 6) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
+                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
                      ELSE 9 END AS tp_r2,
-                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(tp_sfc - LAG(tp_sfc, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
                      ELSE 9 END AS tp_r3
             """)
             sel_cols.append("""
@@ -1209,13 +1222,13 @@ class MeteoValidator:
             """)
 
         if "press" in colunas_existentes:
-            cte_cols.append("""
+            cte_cols.append(f"""
                 CAST(press AS DOUBLE) AS press_avg,
                 CASE WHEN press IS NULL THEN 5
                      WHEN press < press_min OR press > press_max THEN 2
                      ELSE 9 END AS press_r1,
-                CASE WHEN ABS(press - LAG(press, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(press - LAG(press, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) < 6 THEN 2
+                CASE WHEN ABS(press - LAG(press, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(press - LAG(press, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) > 6 THEN 2
                      ELSE 9 END AS press_r2
             """)
             sel_cols.append("""
@@ -1226,16 +1239,16 @@ class MeteoValidator:
             """)
 
         if "ws10_avg" in colunas_existentes:
-            cte_cols.append("""
+            cte_cols.append(f"""
                 CAST(ws10_avg AS DOUBLE) AS ws_avg,
                 CASE WHEN ws10_avg IS NULL THEN 5
                      WHEN ws10_avg < 0 OR ws10_avg > 25 THEN 2
                      ELSE 9 END AS ws_r1,
-                CASE WHEN ABS(ws10_avg - LAG(ws10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(ws10_avg - LAG(ws10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.1 THEN 2
+                CASE WHEN ABS(ws10_avg - LAG(ws10_avg, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(ws10_avg - LAG(ws10_avg, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.1 THEN 2
                      ELSE 9 END AS ws_r2,
-                CASE WHEN ABS(ws10_avg - LAG(ws10_avg, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(ws10_avg - LAG(ws10_avg, 72) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                CASE WHEN ABS(ws10_avg - LAG(ws10_avg, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(ws10_avg - LAG(ws10_avg, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
                      ELSE 9 END AS ws_r3
             """)
             sel_cols.append("""
@@ -1246,16 +1259,16 @@ class MeteoValidator:
             """)
 
         if "wd10_avg" in colunas_existentes:
-            cte_cols.append("""
+            cte_cols.append(f"""
                 CAST(wd10_avg AS DOUBLE) AS wd_avg,
                 CASE WHEN wd10_avg IS NULL THEN 5
                      WHEN wd10_avg < 0 OR wd10_avg > 360 THEN 2
                      ELSE 9 END AS wd_r1,
-                CASE WHEN ABS(wd10_avg - LAG(wd10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(wd10_avg - LAG(wd10_avg, 18) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 1 THEN 2
+                CASE WHEN ABS(wd10_avg - LAG(wd10_avg, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(wd10_avg - LAG(wd10_avg, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 1 THEN 2
                      ELSE 9 END AS wd_r2,
-                CASE WHEN ABS(wd10_avg - LAG(wd10_avg, 108) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(wd10_avg - LAG(wd10_avg, 108) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 10 THEN 2
+                CASE WHEN ABS(wd10_avg - LAG(wd10_avg, {self.lag_18h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                     WHEN ABS(wd10_avg - LAG(wd10_avg, {self.lag_18h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 10 THEN 2
                      ELSE 9 END AS wd_r3
             """)
             sel_cols.append("""
@@ -1266,16 +1279,16 @@ class MeteoValidator:
             """)
 
         if "rain" in colunas_existentes:
-            cte_cols.append("""
+            cte_cols.append(f"""
                 CAST(rain AS DOUBLE) AS rain,
                 CASE WHEN rain IS NULL THEN 5
                      WHEN rain < 0 OR rain > rain_max THEN 2
                      ELSE 9 END AS rain_r1,
-                CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) IS NULL THEN 5
-                     WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) > 25 THEN 2
+                CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN {self.lag_1h_rain} PRECEDING AND CURRENT ROW) IS NULL THEN 5
+                     WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN {self.lag_1h_rain} PRECEDING AND CURRENT ROW) > 25 THEN 2
                      ELSE 9 END AS rain_r2,
-                CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 143 PRECEDING AND CURRENT ROW) IS NULL THEN 5
-                     WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN 143 PRECEDING AND CURRENT ROW) > 100 THEN 2
+                CASE WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN {self.lag_24h_rain} PRECEDING AND CURRENT ROW) IS NULL THEN 5
+                     WHEN SUM(rain) OVER (PARTITION BY acronym ORDER BY timestamp ROWS BETWEEN {self.lag_24h_rain} PRECEDING AND CURRENT ROW) > 100 THEN 2
                      ELSE 9 END AS rain_r3
             """)
             sel_cols.append("""
