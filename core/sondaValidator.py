@@ -536,16 +536,24 @@ class SolarimetricValidator:
 
         if "lw_avg" in colunas_existentes:
             if "tp_sfc" in colunas_existentes:
-                # Raw temp flags — used by lw Alg3 (Stefan-Boltzmann consistency)
+                # Raw temp flags (mirror the meteo temp algorithms) — used by lw
+                # Alg3 (Stefan-Boltzmann consistency): lw Alg3 = 5 when the temp
+                # reading is itself flagged by any algorithm (temp unreliable).
+                ow_lw = "OVER (PARTITION BY acronym ORDER BY timestamp)"
+                w12_lw = (f"OVER (PARTITION BY acronym ORDER BY timestamp "
+                          f"ROWS BETWEEN {self.lag_12h} PRECEDING AND CURRENT ROW)")
+                prev1_lw, next1_lw = f"LAG(tp_sfc, 1) {ow_lw}", f"LEAD(tp_sfc, 1) {ow_lw}"
+                lag12_lw = f"LAG(tp_sfc, {self.lag_12h}) {ow_lw}"
                 cte_cols.append(f"""
                     CASE WHEN tp_sfc IS NULL THEN 5
                          WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2
                          ELSE 9 END AS tp_r1_lw,
-                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
+                    CASE WHEN tp_sfc IS NULL OR {prev1_lw} IS NULL OR {next1_lw} IS NULL THEN 5
+                         WHEN (tp_sfc - {prev1_lw}) >=  5 AND (tp_sfc - {next1_lw}) >=  5 THEN 2
+                         WHEN (tp_sfc - {prev1_lw}) <= -5 AND (tp_sfc - {next1_lw}) <= -5 THEN 2
                          ELSE 9 END AS tp_r2_lw,
-                    CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                         WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                    CASE WHEN tp_sfc IS NULL OR {lag12_lw} IS NULL THEN 5
+                         WHEN (MAX(tp_sfc) {w12_lw} - MIN(tp_sfc) {w12_lw}) <= 0.5 THEN 2
                          ELSE 9 END AS tp_r3_lw
                 """)
             cte_cols.append("""
@@ -1192,16 +1200,37 @@ class MeteoValidator:
         sel_cols = []   # final DQC columns with cascade in the outer SELECT
 
         if "tp_sfc" in colunas_existentes:
+            # 3 algorithms, digit order Alg3|Alg2|Alg1:
+            #   Alg1 (range)       : tp outside [tp_min, tp_max] -> 2
+            #   Alg2 (spike)       : single reading >= 5 C from BOTH neighbours, same
+            #                        direction (jumps and snaps back) -> 2  [glitch]
+            #   Alg3 (12h persist) : tp constant across the trailing 12h window
+            #                        (MAX-MIN <= 0.5 C) -> 2  [stuck sensor]
+            # Alg2 is a spike detector, not a 1h jump: a |tp[t]-tp[t-1h]| jump fires
+            # on sustained, real rapid-cooling weather (afternoon storms), which is
+            # good data; requiring deviation from both neighbours isolates true
+            # single-point instrument glitches. Alg3 tests window-constancy, not the
+            # two endpoints (an endpoint diff fires twice a day on a diurnal signal).
+            # NULL LAG/LEAD (file edges, first 12h, gaps) -> 5 (insufficient):
+            # expected boundary. These temporal checks are retained as legitimate QC
+            # even though the reference DQC omits them (it uses a within-interval std
+            # check we cannot reproduce from 1-min input). See data/DQC/report.md.
+            ow = "OVER (PARTITION BY acronym ORDER BY timestamp)"
+            w12 = (f"OVER (PARTITION BY acronym ORDER BY timestamp "
+                   f"ROWS BETWEEN {self.lag_12h} PRECEDING AND CURRENT ROW)")
+            prev1, next1 = f"LAG(tp_sfc, 1) {ow}", f"LEAD(tp_sfc, 1) {ow}"
+            lag12 = f"LAG(tp_sfc, {self.lag_12h}) {ow}"
             cte_cols.append(f"""
                 CAST(tp_sfc AS DOUBLE) AS temp_avg,
                 CASE WHEN tp_sfc IS NULL THEN 5
                      WHEN tp_sfc < tp_min OR tp_sfc > tp_max THEN 2
                      ELSE 9 END AS tp_r1,
-                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_1h}) OVER (PARTITION BY acronym ORDER BY timestamp)) >= 5 THEN 2
+                CASE WHEN tp_sfc IS NULL OR {prev1} IS NULL OR {next1} IS NULL THEN 5
+                     WHEN (tp_sfc - {prev1}) >=  5 AND (tp_sfc - {next1}) >=  5 THEN 2
+                     WHEN (tp_sfc - {prev1}) <= -5 AND (tp_sfc - {next1}) <= -5 THEN 2
                      ELSE 9 END AS tp_r2,
-                CASE WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
-                     WHEN ABS(tp_sfc - LAG(tp_sfc, {self.lag_12h}) OVER (PARTITION BY acronym ORDER BY timestamp)) <= 0.5 THEN 2
+                CASE WHEN tp_sfc IS NULL OR {lag12} IS NULL THEN 5
+                     WHEN (MAX(tp_sfc) {w12} - MIN(tp_sfc) {w12}) <= 0.5 THEN 2
                      ELSE 9 END AS tp_r3
             """)
             sel_cols.append("""
@@ -1227,7 +1256,7 @@ class MeteoValidator:
                 CASE WHEN press IS NULL THEN 5
                      WHEN press < press_min OR press > press_max THEN 2
                      ELSE 9 END AS press_r1,
-                CASE WHEN ABS(press - LAG(press, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 5
+                CASE WHEN ABS(press - LAG(press, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) IS NULL THEN 9
                      WHEN ABS(press - LAG(press, {self.lag_3h}) OVER (PARTITION BY acronym ORDER BY timestamp)) > 6 THEN 2
                      ELSE 9 END AS press_r2
             """)

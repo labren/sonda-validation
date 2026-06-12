@@ -23,61 +23,79 @@ from tests.conftest import meteo_row, run_meteo, make_timeseries, dqc
 
 
 # ===========================================================================
-# temp_avg  (tp_sfc → temp_avg)  — 3 algorithms → 4-digit DQC
+# temp_avg  (tp_sfc → temp_avg)  — 3 algorithms → 3-digit DQC (Alg3|Alg2|Alg1)
 #
-# pos 1 (Alg3): 12-hour persistence  |tp[t] − tp[t−72]| ≤ 0.5°C  → 2
-# pos 2 (Alg2): 1-hour jump          |tp[t] − tp[t−6]|  ≥ 5°C    → 2
-# pos 3 (Alg1): climatic normals     tp < tp_min  OR  tp > tp_max → 2
+# pos 1 (Alg3): 12h persistence  MAX(tp)−MIN(tp) over trailing 12h ≤ 0.5°C → 2
+# pos 2 (Alg2): spike            tp ≥ 5°C from BOTH neighbours, same dir   → 2
+# pos 3 (Alg1): climatic normals tp < tp_min  OR  tp > tp_max              → 2
+#
+# Only flag=2 cascades forward; flag=5 (NULL LAG/LEAD at file edges) does not.
+# Alg2 is a spike detector (isolated glitch), NOT a 1h jump — a jump fires on
+# sustained real weather (afternoon storm cooling). Alg3 tests window-constancy,
+# NOT the two endpoints (an endpoint diff fires twice a day on a diurnal signal).
+# Both temporal checks are retained as legitimate QC even though the reference
+# DQC omits them (it uses a within-interval std check we cannot reproduce from
+# 1-min input); the resulting divergences are expected — see data/DQC/report.md.
 # ===========================================================================
 
 class TestTempAvg:
 
     def test_all_pass(self, con):
-        # 73 rows with a clear 12-hour trend (no persistence) and no big jumps
-        # Row 0: tp=20, Row 72: tp=25 → Δ12h=5 > 0.5 → pos1=9
-        # Δ1h at last row ≈ 5/72*6 ≈ 0.4 < 5 → pos2=9
+        # Gentle 12h trend (not stuck, no spike, in range) at a row with full
+        # 12h history and both neighbours present → all algorithms pass.
         rows = make_timeseries(
-            meteo_row(tp_sfc=20.0), n=73,
-            overrides={i: {"tp_sfc": 20.0 + i * (5.0 / 72)} for i in range(73)}
+            meteo_row(tp_sfc=20.0), n=80,
+            overrides={i: {"tp_sfc": 20.0 + i * 0.05} for i in range(80)}
         )
         df = run_meteo(con, rows)
-        assert dqc(df, "temp_avg_dqc", row=-1) == "999"
+        assert dqc(df, "temp_avg_dqc", row=75) == "999"
 
     def test_null_input(self, con):
-        # Single row with NULL tp_sfc
-        # All LAG-based algorithms return 5 (NULL diff), normals check also 5
+        # NULL tp_sfc → every algorithm reports 5 (cannot evaluate)
         row = meteo_row(tp_sfc=None)
         df = run_meteo(con, [row])
         assert dqc(df, "temp_avg_dqc") == "555"
 
     def test_pos1_fails_persistence(self, con):
-        # 73 rows at constant tp=25.0 → |Δ72|=0 ≤ 0.5 → Alg3=2 → cascade
+        # 73 rows at constant tp=25.0 → MAX−MIN over 12h window = 0 ≤ 0.5
+        # → Alg3=2 (stuck sensor) → cascade
         rows = make_timeseries(meteo_row(tp_sfc=25.0), n=73)
         df = run_meteo(con, rows)
         assert dqc(df, "temp_avg_dqc", row=-1) == "222"
 
-    def test_pos2_fails_jump(self, con):
-        # Rows 0–71: tp=20.0  |  Row 72: tp=26.0
-        # Δ12h = 26−20 = 6 > 0.5 → pos1=9
-        # Δ1h  = 26−20 = 6 ≥ 5   → pos2=2 → cascade pos3=2
+    def test_pos2_fails_spike(self, con):
+        # Row 75 jumps to 26 while both neighbours stay at 20 (deviates from
+        # both by +6 ≥ 5, same direction) → Alg2=2 (glitch) → cascade pos3=2.
+        # Alg3=9 because the spike makes the 12h window non-constant.
         rows = make_timeseries(
-            meteo_row(tp_sfc=20.0), n=73,
-            overrides={72: {"tp_sfc": 26.0}}
+            meteo_row(tp_sfc=20.0), n=80,
+            overrides={75: {"tp_sfc": 26.0}}
         )
         df = run_meteo(con, rows)
-        assert dqc(df, "temp_avg_dqc", row=-1) == "922"
+        assert dqc(df, "temp_avg_dqc", row=75) == "922"
+
+    def test_sustained_change_not_flagged(self, con):
+        # A steep but SUSTAINED drop (3°C/step, monotonic) is real weather, not a
+        # spike: each point sits between its neighbours, so the same-direction
+        # condition fails → Alg2=9.  Contrast with test_pos2_fails_spike.
+        rows = make_timeseries(
+            meteo_row(tp_sfc=30.0), n=80,
+            overrides={73: {"tp_sfc": 27.0}, 74: {"tp_sfc": 24.0},
+                       75: {"tp_sfc": 21.0}, 76: {"tp_sfc": 18.0}}
+        )
+        df = run_meteo(con, rows)
+        assert dqc(df, "temp_avg_dqc", row=74) == "999"
 
     def test_pos3_fails_normals(self, con):
         # Single row: tp=45 > tp_max=40 → Alg1=2
-        # No LAG data → Alg3=5, Alg2=5 (independently, no cascade from 5)
+        # No neighbours / no LAG → Alg3=5, Alg2=5 (no cascade from 5) → "552"
         row = meteo_row(tp_sfc=45.0)
         df = run_meteo(con, [row])
         assert dqc(df, "temp_avg_dqc") == "552"
 
     def test_no_cascade_from_5(self, con):
-        # Single row: LAG values are NULL → pos1=5, pos2=5
-        # tp_sfc in normals range → pos3=9 independently
-        # flag=5 must NOT cascade to override pos3
+        # Single row: no neighbours → pos2=5, no 12h LAG → pos1=5
+        # tp_sfc in normals range → pos3=9 independently; 5 must NOT cascade
         row = meteo_row(tp_sfc=25.0)
         df = run_meteo(con, [row])
         assert dqc(df, "temp_avg_dqc") == "559"
@@ -114,41 +132,45 @@ class TestRhAvg:
 
 
 # ===========================================================================
-# press_avg  (press → press_avg)  — 2 algorithms → 3-digit DQC
+# press_avg  (press → press_avg)  — 2 algorithms → 3-digit DQC ('0'|Alg2|Alg1)
 #
-# pos 1 (Alg2): 3-hour variation  |press[t] − press[t−18]| < 6 hPa → 2
-# pos 2 (Alg1): climatic normals  press < press_min OR > press_max  → 2
-# pos 3:        placeholder        always '0'
+# pos 1:        placeholder        always '0'
+# pos 2 (Alg2): 3-hour jump        |press[t] − press[t−18]| > 6 hPa → 2
+#               NULL history (no LAG) → 9 (pass): the reference never flags the
+#               leading rows of a window. Small/no variation is normal → 9.
+# pos 3 (Alg1): climatic normals   press < press_min OR > press_max → 2
 # ===========================================================================
 
 class TestPressAvg:
 
     def test_all_pass(self, con):
-        # 19 rows with clear 3h variation (10 hPa shift at row 18)
+        # 19 rows at steady press=950 (|Δ18|=0 ≤ 6 → Alg2 pass; in range) → "099"
+        rows = make_timeseries(meteo_row(press=950.0), n=19)
+        df = run_meteo(con, rows)
+        assert dqc(df, "press_avg_dqc", row=-1) == "099"
+
+    def test_null_input(self, con):
+        # NULL press → Alg1=5 (range not checkable); Alg2=9 (no jump detectable)
+        row = meteo_row(press=None)
+        df = run_meteo(con, [row])
+        assert dqc(df, "press_avg_dqc") == "095"
+
+    def test_pos2_fails_large_jump(self, con):
+        # 19 rows press=950 with a 10 hPa jump at row 18 → |Δ18|=10 > 6 → Alg2=2
+        # → cascade forces Alg1 digit to 2 → "022"
         rows = make_timeseries(
             meteo_row(press=950.0), n=19,
             overrides={18: {"press": 960.0}}
         )
         df = run_meteo(con, rows)
-        assert dqc(df, "press_avg_dqc", row=-1) == "099"
-
-    def test_null_input(self, con):
-        row = meteo_row(press=None)
-        df = run_meteo(con, [row])
-        assert dqc(df, "press_avg_dqc") == "055"
-
-    def test_pos1_fails_no_variation(self, con):
-        # 19 rows at constant press=950 → |Δ18|=0 < 6 → Alg2=2 → cascade pos2=2
-        rows = make_timeseries(meteo_row(press=950.0), n=19)
-        df = run_meteo(con, rows)
         assert dqc(df, "press_avg_dqc", row=-1) == "022"
 
-    def test_pos2_fails_normals(self, con):
+    def test_pos3_fails_normals(self, con):
         # Single row: press=800 < press_min=900 → Alg1=2
-        # LAG=NULL → Alg2=5 (no cascade from 5)
+        # No LAG history → Alg2=9 (no cascade onto Alg2) → "092"
         row = meteo_row(press=800.0)
         df = run_meteo(con, [row])
-        assert dqc(df, "press_avg_dqc") == "052"
+        assert dqc(df, "press_avg_dqc") == "092"
 
 
 # ===========================================================================

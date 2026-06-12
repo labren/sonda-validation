@@ -34,9 +34,9 @@ sys.path.insert(0, PROJECT_DIR)
 
 from core.sondaValidator import SolarimetricValidator, MeteoValidator
 
-INPUT_CSV    = os.path.join(SCRIPT_DIR, "CPA1811ED.csv")
-REF_CSV      = os.path.join(SCRIPT_DIR, "CPA1811ED_DQC.csv")
-STATIONS_CSV = os.path.join(PROJECT_DIR, "data", "metadata", "INPESONDA_stations.csv")
+INPUT_CSV    = os.path.join(SCRIPT_DIR, "CPA1812ED.csv")
+REF_CSV      = os.path.join(SCRIPT_DIR, "CPA1812ED_DQC.csv")
+STATIONS_CSV = os.path.join(SCRIPT_DIR, "metadata", "INPESONDA_stations.csv")
 NORMAIS_CSV  = os.path.join(PROJECT_DIR, "data", "metadata", "INPESONDA_normais_climatology.csv")
 
 # ── column definitions ────────────────────────────────────────────────────────

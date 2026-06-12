@@ -99,13 +99,15 @@ class TestGloAvg:
 
 class TestDirAvg:
 
-    def _consistent_glo(self, dir_v):
-        """glo that satisfies the dir consistency window: glo - dir ≈ dir*mu0"""
-        return dir_v * (1 + MU0)   # midpoint of the ±50 window
+    def _closure_glo(self, dir_v, dif_v=200.0):
+        """glo satisfying the dir Alg3 closure  GHI = DHI + DNI·cos(z):
+        glo = dif + dir·mu0  (so |glo − dir·mu0 − dif| / glo = 0 ≤ 0.10).
+        dif_v defaults to the solar_row default (200.0)."""
+        return dif_v + dir_v * MU0
 
     def test_all_pass(self, con):
         dir_v = 500.0
-        glo_v = self._consistent_glo(dir_v)   # = 900.0
+        glo_v = self._closure_glo(dir_v)   # = 200 + 400 = 600.0
         row = solar_row(dir_avg=dir_v, dir_std=20.0, glo_avg=glo_v, Sum=glo_v)
         df = run_solar(con, [row])
         assert dqc(df, "dir_avg_dqc") == "999"
@@ -122,16 +124,16 @@ class TestDirAvg:
         assert dqc(df, "dir_avg_dqc") == "222"
 
     def test_pos2_fails_rare_range(self, con):
-        # dir > Alg2 limit but < Sa; set glo so consistency passes
-        dir_v = round(DIR_ALG2_UPPER + 5.0, 1)    # ≈ 1250
-        glo_v = self._consistent_glo(dir_v)        # ≈ 2250
+        # dir > Alg2 limit but < Sa; set glo so the closure (Alg3) passes
+        dir_v = round(DIR_ALG2_UPPER + 5.0, 1)    # ≈ 1250.4
+        glo_v = self._closure_glo(dir_v)           # ≈ 1200.3
         row = solar_row(dir_avg=dir_v, dir_std=20.0, glo_avg=glo_v, Sum=glo_v)
         df = run_solar(con, [row])
         assert dqc(df, "dir_avg_dqc") == "922"
 
     def test_pos3_fails_std_zero(self, con):
         dir_v = 500.0
-        glo_v = self._consistent_glo(dir_v)
+        glo_v = self._closure_glo(dir_v)
         row = solar_row(dir_avg=dir_v, dir_std=0.0, glo_avg=glo_v, Sum=glo_v)
         df = run_solar(con, [row])
         assert dqc(df, "dir_avg_dqc") == "992"
